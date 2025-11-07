@@ -47,3 +47,15 @@ llm-sql-bot/
 
 - Verificar que `pip install -r requirements.txt` termine sin errores.
 - Continuar con la fase de experimentos para refinar el planificador de endpoints y, si es necesario, agregar nuevas herramientas sobre la API.
+
+## Slack Bot (Socket Mode)
+
+1. Crea una app en <https://api.slack.com/apps>, habilita **Socket Mode** y genera:
+   - `SLACK_BOT_TOKEN` con los scopes `chat:write`, `app_mentions:read`, `im:history`, etc.
+   - `SLACK_APP_TOKEN` con el scope `connections:write`.
+2. Añade ambos valores al `.env`.
+3. Ejecuta el bot:
+   ```bash
+   python -m app.slack.bot
+   ```
+4. Menciona al bot (o envíale un DM) en tu workspace; la pregunta se enviará al orquestador y el `Final Answer` aparecerá en el hilo correspondiente.
