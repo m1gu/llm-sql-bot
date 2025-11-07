@@ -124,7 +124,8 @@ Si es simple (count/exists), use el chain.
 Devuelve {answer, sql, rows_preview, used: "agent"|"chain"}. Aplica temperature=0, max_tokens razonable y logs de pasos del agente.
 
 Hasta aqui esta implementado
-
+Push a la rama nueva de trabajo
+git push -u origin feature/endpoint-probing
 --------------------------------------------------------------------------
 
 Fase 5 — Schema awareness y glosario
