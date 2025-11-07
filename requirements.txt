@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+langchain==0.0.352
+langchain-community==0.0.20
+langchain-experimental==0.0.47
+sqlalchemy
+psycopg2-binary
+pydantic
+python-dotenv
+loguru
+prometheus-client
+httpx
+slack_bolt

@@ -1,0 +1,393 @@
+Objetivo
+
+Construir, en local, un chatbot de datos que responda preguntas en lenguaje natural sobre una base PostgreSQL pequeña (6 tablas, ~10k filas máx por tabla) usando:
+
+Python (stock)
+
+Ollama con Mistral 7B Instruct
+
+LangChain (orquestación + SQL Agent)
+
+FastAPI (API)
+
+Slack Bot (Bolt para Python)
+
+Observabilidad (logs/metrics), prompts con “schema awareness”, y controles de seguridad (solo lectura, guardas de SQL, rate limit).
+
+Cada fase es un paso pequeño y funcional con entregables y un prompt sugerido para Codex (copiar/pegar).
+
+------------------------------------------------------------
+Fase 0 — Scaffold del proyecto
+
+Meta: Estructura mínima reproducible.
+
+Entregables:
+
+Estructura:
+
+llm-sql-bot/
+  app/
+    api/
+    agent/
+    db/
+    prompts/
+    security/
+    observability/
+    slack/
+    __init__.py
+  tests/
+  .env.example
+  pyproject.toml  (o requirements.txt)
+  README.md
+
+
+requirements.txt (o pyproject.toml) con:
+fastapi uvicorn langchain langchain-community sqlalchemy psycopg2-binary pydantic python-dotenv loguru prometheus-client httpx slack_bolt
+
+.env.example con PG_URI, OLLAMA_BASE_URL, SLACK_BOT_TOKEN, SLACK_APP_TOKEN.
+
+Prompt Codex:
+
+Crea la estructura de carpetas anterior, un requirements.txt con los paquetes listados y un README.md que explique cómo crear venv, instalar dependencias y copiar .env.example a .env.
+
+---------------------------------------------------------------------------
+
+Fase 1 — Ollama + Mistral 7B (prueba local)
+
+Meta: Levantar modelo y hacer una llamada desde Python.
+
+Entregables:
+
+Comando: ollama pull mistral:instruct y ollama serve.
+
+Script app/agent/llm_client.py que haga una llamada simple al endpoint de Ollama.
+
+Prompt Codex:
+
+Escribe app/agent/llm_client.py con una clase LLMClient que use httpx para llamar a OLLAMA_BASE_URL (/api/chat) y un método chat(messages: list[dict]) -> str. Incluye ejemplo en if __name__ == "__main__": que envíe un system+user y printee la respuesta.
+
+----------------------------------------------------------------------------
+
+Fase 2 — Conexión PostgreSQL (solo lectura)
+
+Meta: Conectar a Postgres vía SQLAlchemy/psycopg con rol de solo lectura.
+
+Entregables:
+
+SQL para crear rol y limitar permisos.
+
+app/db/pg.py con get_engine() y run_sql(sql: str) -> rows.
+
+Prompt Codex:
+
+Crea app/db/pg.py que lea PG_URI de .env, construya create_engine de SQLAlchemy y exponga run_sql(sql: str) -> list[dict] con timeout y LIMIT 50 si no existe. Añade manejo de excepciones y logging. Incluye en comentarios SQL para crear un rol de solo lectura y conceder permisos en un esquema concreto.
+
+-------------------------------------------------------------------------------
+
+Fase 3 — LangChain: one-shot NL→SQL (SQLDatabaseChain)
+
+Meta: Primer “happy path” rápido.
+
+Entregables:
+
+app/agent/nl2sql_chain.py que:
+
+Conecte SQLDatabase (SQLAlchemy)
+
+Configure ChatOllama de langchain_community
+
+Use SQLDatabaseChain para: Pregunta → SQL → Ejecutar → Respuesta
+
+Prompt Codex:
+
+Implementa app/agent/nl2sql_chain.py con una función answer_question(question: str) -> dict que use ChatOllama(model="mistral:instruct", temperature=0) y SQLDatabaseChain.from_llm(...). Retorna { "answer": str, "sql": str, "rows_preview": list }. Inyecta en el prompt un “system hint” que limite a SELECT y pida aclaración si hay ambigüedad.
+
+-------------------------------------------------------------------------
+
+Fase 4 — LangChain: SQL Agent (descubrimiento + reintentos)
+
+Meta: Soportar consultas complejas con tools: list_tables, get_table_info, ejecutar SQL, leer errores y reintentar.
+
+Entregables:
+
+app/agent/sql_agent.py con create_sql_agent(...) usando SQLDatabaseToolkit y AgentType.ZERO_SHOT_REACT_DESCRIPTION.
+
+Fallback al chain de Fase 3 según heurística (simple vs complejo).
+
+Prompt Codex:
+
+Crea app/agent/sql_agent.py con una función route_and_answer(question: str) -> dict que:
+
+Si la pregunta contiene palabras como “promedio”, “por región”, “último mes”, “top”, “comparar”, use el agente.
+
+Si es simple (count/exists), use el chain.
+Devuelve {answer, sql, rows_preview, used: "agent"|"chain"}. Aplica temperature=0, max_tokens razonable y logs de pasos del agente.
+
+Hasta aqui esta implementado
+
+--------------------------------------------------------------------------
+
+Fase 5 — Schema awareness y glosario
+
+Meta: Inyectar esquema resumido y sinónimos.
+
+Entregables:
+
+Script app/db/describe.py que extrae nombres de tablas/columnas y claves foráneas desde information_schema y guarda app/prompts/schema.md.
+
+app/prompts/glossary.md mapeando “términos de negocio” → tablas/columnas.
+
+Prompt Codex:
+
+Crea app/db/describe.py que conecte a Postgres y genere app/prompts/schema.md con un resumen (tablas, columnas, tipos, FK). Agrega app/prompts/glossary.md de ejemplo con 5-10 sinónimos (“clientes=users”, etc.). Modifica nl2sql_chain.py y sql_agent.py para inyectar estos archivos al prompt del sistema.
+
+-------------------------------------------------------------------------------
+
+Fase 6 — Seguridad (guardas de SQL)
+
+Meta: Evitar DDL/DML y consultas peligrosas.
+
+Entregables:
+
+app/security/sql_guard.py con:
+
+is_safe_sql(sql) que solo permita SELECT sin ;, sin --, sin /* */, sin DROP/UPDATE/DELETE/INSERT/ALTER.
+
+Forzar LIMIT si falta, SET statement_timeout.
+
+Prompt Codex:
+
+Implementa app/security/sql_guard.py con validaciones por regex y lista de palabras prohibidas. Integra este guard en nl2sql_chain.py y sql_agent.py antes de ejecutar cualquier SQL. Si falla, devuelve error controlado “consulta no permitida”.
+
+-------------------------------------------------------------------------------
+
+Fase 7 — API FastAPI
+
+Meta: Exponer /health, /chat (simple/agent), opcional /sql debug.
+
+Entregables:
+
+app/api/server.py con:
+
+POST /chat body: {question: str, mode: "auto"|"agent"|"chain"}
+→ resp {answer, sql, rows_preview, used}
+
+GET /health → 200
+
+uvicorn app.api.server:app --reload
+
+Prompt Codex:
+
+Escribe app/api/server.py con FastAPI. Implementa /chat que enrute a route_and_answer. Añade validación de payload con Pydantic, manejo de excepciones, y CORS disabled por defecto. Incluye main para correr con Uvicorn.
+
+----------------------------------------------------------------------------
+
+Fase 8 — Observabilidad (logs + métricas)
+
+Meta: Logs estructurados, latencias y contadores.
+
+Entregables:
+
+app/observability/logs.py (loguru) con request_id, duración, tamaño de respuesta.
+
+app/observability/metrics.py (prometheus_client) con:
+
+Histograma llm_sql_latency_seconds
+
+Counter llm_sql_errors_total
+
+Exponer /metrics en FastAPI.
+
+Prompt Codex:
+
+Añade middleware en FastAPI que registre request_id por solicitud, mida latencia y exponga /metrics con prometheus_client. Instrumenta route_and_answer para observar pasos del agente y errores SQL.
+
+----------------------------------------------------------------------------
+
+Fase 9 — Slack Bot (Bolt para Python)
+
+Meta: Bot que reenvía preguntas a la API y responde en hilo.
+
+Entregables:
+
+app/slack/bot.py con Bolt:
+
+Escucha menciones o /askdb.
+
+Llama POST /chat (mode=auto).
+
+Publica respuesta y, si el usuario escribe “sql?”, devuelve la consulta.
+
+Prompt Codex:
+
+Implementa app/slack/bot.py usando slack_bolt. Lee SLACK_BOT_TOKEN y SLACK_APP_TOKEN del .env. Registra handler para menciones y comando /askdb. Llama a la API local, maneja errores y responde en el thread del mensaje original. Incluye if __name__ == "__main__": para iniciar SocketMode.
+
+----------------------------------------------------------------------------
+
+Fase 10 — Rate limit, timeouts y auditoría
+
+Meta: Robustez en producción local.
+
+Entregables:
+
+Middleware de rate limit simple (por usuario Slack o IP) con memoria local.
+
+Timeout global por request (ej. 15s).
+
+Audit log: {user, question, sql, rowcount, ms} a archivo rotado.
+
+Prompt Codex:
+
+Agrega a server.py un middleware de rate limit (20 req/min por usuario) y un timeout por request. Implementa audit_log(question, sql, rows_count, user, ms) que escriba JSON lines a logs/audit.log con rotación diaria.
+
+-------------------------------------------------------------------------
+
+Fase 11 — Tests
+
+Meta: Confianza mínima.
+
+Entregables:
+
+tests/test_sql_guard.py (casos válidos/invalidos).
+
+tests/test_agent_integration.py con una BD de prueba (sqlite o PG docker) y 3 preguntas.
+
+Prompt Codex:
+
+Crea pruebas para sql_guard.py (listas de queries válidas/invalidas) y un test de integración que levante un engine temporal con 2 tablas mock, inserte datos y verifique que route_and_answer responda correctamente a 3 preguntas simples.
+
+---------------------------------------------------------------------------
+
+Fase 12 — Empaquetado local (docker-compose)
+
+Meta: Arranque con 1 comando.
+
+Entregables:
+
+docker-compose.yml con servicios: postgres, api, ollama (opcional LM Studio standalone), y una red interna.
+
+Dockerfile de API con dependencias.
+
+Makefile (make up, make logs, make down).
+
+Prompt Codex:
+
+Genera docker-compose.yml con Postgres (volumen), API (exponiendo 8000), y Ollama (exponiendo 11434). Asegura dependencias de red (API espere a Postgres). Crea Dockerfile para API basado en python:3.11-slim y un Makefile con comandos básicos.
+
+----------------------------------------------------------------------------
+
+Fase 13 — Mejoras opcionales
+
+Meta: Evolución sin romper lo anterior.
+
+Entregables:
+
+Cache con Redis (TTL 60s) por normalized(question).
+
+Export CSV: si el usuario escribe “csv”, adjuntar archivo (Slack).
+
+Schema retriever: embeddings de esquema (pgvector) y selección de tablas relevantes previo al prompt.
+
+Streaming de tokens en FastAPI.
+
+Prompt Codex:
+
+Implementa cache Redis en route_and_answer (checksum de pregunta + modo). Agrega endpoint /export que reciba SQL verificado y devuelva CSV. Añade streaming de tokens desde Ollama a FastAPI usando async generator y SSE.
+
+Prompts base (para inyectar en el sistema)
+
+app/prompts/system_base.md
+
+Eres un analista experto en PostgreSQL.
+Objetivo: responder preguntas de negocio usando SOLO consultas SELECT contra la BD.
+Reglas:
+- No ejecutes DDL/DML (DROP/UPDATE/DELETE/INSERT/ALTER).
+- Si la pregunta es ambigua, pide una aclaración breve antes de consultar.
+- Usa nombres de tablas/columnas EXACTOS del esquema.
+- Incluye siempre LIMIT si el resultado puede ser grande.
+- Si la consulta falla, analiza el error y corrige en un segundo intento.
+Formato de salida intermedia (oculta): genera primero la SQL, luego ejecuta, luego redacta respuesta clara y breve, con cifras y rango de fechas si aplica.
+
+
+app/prompts/schema.md (generado en Fase 5)
+Resumen de tablas/columnas/relaciones (auto-generado).
+
+app/prompts/glossary.md
+Sinónimos de negocio → nombres reales (editado a mano).
+
+Ejemplos de prompts a Codex por fase (resumen)
+
+F0 Scaffold:
+“Genera estructura, requirements y README con instrucciones de venv.”
+
+F1 LLM Client:
+“Crea LLMClient en Python que llame a /api/chat de Ollama con mensajes OpenAI-like y devuelva content.”
+
+F2 PG Conexión:
+“Implementa run_sql(sql) con SQLAlchemy, timeout, LIMIT por defecto y logging.”
+
+F3 Chain:
+“Construye SQLDatabaseChain con ChatOllama y retorna {answer, sql, rows_preview}; inyecta system_base.md.”
+
+F4 Agent:
+“Crea create_sql_agent con SQLDatabaseToolkit, AgentType.ZERO_SHOT_REACT_DESCRIPTION y router route_and_answer.”
+
+F5 Schema:
+“Extrae esquema desde information_schema y guarda schema.md; inyecta schema.md y glossary.md en prompts.”
+
+F6 Seguridad:
+“Implementa is_safe_sql que solo permita SELECT y bloquee patrones peligrosos; intégralo antes de ejecutar.”
+
+F7 API:
+“FastAPI con /chat y /health, Pydantic models, errores controlados, y arranque con uvicorn.”
+
+F8 Observabilidad:
+“Middleware de logs y /metrics con prometheus_client; contadores e histogramas.”
+
+F9 Slack:
+“Bolt Python que escucha menciones y /askdb, llama /chat y responde en thread; comando ‘sql?’ muestra la query.”
+
+F10 Robustez:
+“Rate limit por usuario, timeout global, audit log JSON lines.”
+
+F11 Tests:
+“Pytests para guardas y un test de integración con BD temporal.”
+
+F12 Compose:
+“Dockeriza API y Postgres, integra Ollama; Makefile con up/logs/down.”
+
+F13 Mejores:
+“Cache Redis, export CSV, schema retriever con pgvector, streaming SSE.”
+
+
+Checklist de Done/Ready por fase
+
+F0: repo listo, pip install -r requirements.txt OK.
+
+F1: python app/agent/llm_client.py responde.
+
+F2: run_sql("select 1") OK con rol de solo lectura.
+
+F3: pregunta simple devuelve resultado correcto.
+
+F4: pregunta compleja (join + group by) resuelta; reintento ante error.
+
+F5: el modelo usa nombres correctos gracias a schema.md + glosario.
+
+F6: intentos de DDL/DML bloqueados.
+
+F7: curl localhost:8000/health 200; /chat responde JSON.
+
+F8: logs con request_id; /metrics expone contadores y latencias.
+
+F9: en Slack, @bot ¿ventas del último mes por región? responde; “sql?” muestra SQL.
+
+F10: rate limit y auditoría funcionando.
+
+F11: tests verdes.
+
+F12: make up levanta todo local.
+
+F13: mejoras opcionales según tiempo.
+
+Con este roadmap puedes avanzar paso a paso, verificando valor en cada fase y manteniendo el sistema simple, seguro y observable.

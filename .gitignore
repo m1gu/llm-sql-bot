@@ -1,0 +1,74 @@
+# General
+__pycache__/
+*.py[cod]
+*.class
+*.pyo
+*.pyd
+.Python
+.DS_Store
+Thumbs.db
+*.log
+logs/
+*.tmp
+*.bak
+
+# Virtual environments / env files
+.venv/
+.env
+.env.*
+!.env.example
+.python-version
+
+# Build / packaging artifacts
+build/
+dist/
+downloads/
+sdist/
+eggs/
+.eggs/
+*.egg-info/
+*.egg
+parts/
+var/
+lib/
+lib64/
+
+# Installer leftovers
+pip-log.txt
+pip-delete-this-directory.txt
+*.manifest
+*.spec
+
+# Test / coverage cache
+.pytest_cache/
+.hypothesis/
+.tox/
+.nox/
+.cache/
+.coverage
+.coverage.*
+coverage.xml
+nosetests.xml
+*.cover
+
+# Type checker caches
+.mypy_cache/
+.dmypy.json
+.pyre/
+
+# Editors / tooling
+.vscode/
+.idea/
+
+# Jupyter
+.ipynb_checkpoints
+
+# Databases / dumps
+*.db
+*.sqlite
+*.sqlite3
+*.sql
+
+# Docs / generated
+site/
+
