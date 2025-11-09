@@ -552,3 +552,105 @@ curl -X GET "http://localhost:8000/api/v1/metrics/tests/tat?date_created_from=20
 
 ```bash
 curl -X GET "http://localhost:8000/api/v1/metrics/customers/top-tests?date_from=2024-01-01T00:00:00Z&date_to=2024-01-15T23:59:59Z&limit=5"
+
+
+
+## ENDPOINTS BY CUSTOMER
+
+Esta sección concentra endpoints pensados para contestar preguntas por cliente (por ejemplo “¿cuántas órdenes abiertas tiene La Casa de las Flores?”) sin obligar al bot a encadenar múltiples consultas ni resolver IDs manualmente.
+
+### GET /api/v1/analytics/customers/orders/summary
+
+Devuelve un resumen compacto de órdenes por cliente, resolviendo nombres parciales/alias y retornando tanto métricas agregadas como una lista limitada de órdenes abiertas para dar contexto.
+
+**Parámetros Query**
+
+| Parámetro | Tipo | Descripción |
+| --- | --- | --- |
+| `customer_id` | int, opcional | Identificador directo; si llega, omite la resolución por nombre. |
+| `customer_name` | string, opcional | Nombre libre/parcial a resolver. Requiere al menos 3 caracteres. |
+| `match_strategy` | string, opcional (`best`/`all`) | `best` (default) devuelve solo la mejor coincidencia; `all` devuelve la lista completa de matches. |
+| `match_threshold` | float, opcional (0‑1, default 0.6) | Puntaje mínimo para aceptar una coincidencia cuando se usa `customer_name`. |
+| `date_from` / `date_to` | datetime, opcional | Rango en el que se evalúan órdenes abiertas/overdue. |
+| `sla_hours` | float, opcional (default 48) | SLA aplicado al cliente (permite overrides puntuales). |
+| `include_samples` / `include_tests` | bool, opcional (default `false`) | Incluye agregados de muestras/tests pendientes cuando se habilita. |
+| `limit_orders` | int, opcional (default 20) | Máximo de órdenes detalladas en la sección `orders`. |
+
+> **Resolución de alias/parciales:** cuando solo se envía `customer_name`, el backend busca contra `customers.name` y contra la columna/tabla de alias. Cada coincidencia obtiene un `match_score` (0‑1) y solo se acepta si supera `match_threshold`. Con `match_strategy=all` la respuesta incluye `matches` para que el bot elija y vuelva a invocar usando `customer_id`.
+
+**Respuesta (`match_strategy=best`):**
+
+```json
+{
+  "matched_customer": {
+    "id": 742,
+    "name": "La Casa de las Flores",
+    "aliases": ["Casa Flores", "Flores MX"],
+    "match_score": 0.92
+  },
+  "customer": {
+    "id": 742,
+    "name": "La Casa de las Flores",
+    "primary_alias": "Casa Flores",
+    "last_order_at": "2024-10-28T18:22:00Z",
+    "sla_hours": 36
+  },
+  "metrics": {
+    "total_orders": 184,
+    "open_orders": 6,
+    "overdue_orders": 2,
+    "warning_orders": 1,
+    "avg_open_duration_hours": 29.5,
+    "pending_samples": 14,
+    "pending_tests": 57,
+    "last_updated_at": "2024-10-31T12:05:11Z"
+  },
+  "orders": [
+    {
+      "order_id": 90124,
+      "state": "ready_for_review",
+      "age_days": 3,
+      "sla_status": "warning",
+      "date_created": "2024-10-28T09:12:00Z",
+      "pending_samples": 3,
+      "pending_tests": 11
+    },
+    {
+      "order_id": 90088,
+      "state": "in_progress",
+      "age_days": 6,
+      "sla_status": "overdue",
+      "date_created": "2024-10-25T14:20:00Z",
+      "pending_samples": 5,
+      "pending_tests": 21
+    }
+  ],
+  "top_pending": {
+    "matrices": [
+      {"matrix_type": "Blood", "pending_samples": 5},
+      {"matrix_type": "Water", "pending_samples": 3}
+    ],
+    "tests": [
+      {"label_abbr": "HEM", "pending_tests": 12},
+      {"label_abbr": "MIC", "pending_tests": 9}
+    ]
+  }
+}
+```
+
+**Respuesta (`match_strategy=all`):**
+
+```json
+{
+  "matches": [
+    {"id": 742, "name": "La Casa de las Flores", "alias": "Casa Flores", "match_score": 0.92},
+    {"id": 351, "name": "Flores del Valle", "alias": null, "match_score": 0.61}
+  ]
+}
+```
+
+**Notas adicionales**
+
+1. Si `match_strategy=best` no encuentra coincidencias válidas responde `404` con `detail="customer_not_found"`.
+2. `include_samples` / `include_tests` consulta las tablas `samples` y `tests` para calcular `pending_samples`, `pending_tests` y `top_pending`, sin devolver registros individuales para mantener la respuesta ligera.
+3. `last_updated_at` refleja cuándo se generó el resumen (UTC) para que el bot pueda citar la frescura de los datos.

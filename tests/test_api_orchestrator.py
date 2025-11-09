@@ -4,7 +4,14 @@ from typing import Any, Dict, List
 
 import pytest
 
-from app.agent.api_orchestrator import EndpointCall, ApiOrchestrator, extract_json_block, parse_plan_response
+from app.agent.api_orchestrator import (
+    EndpointCall,
+    ApiOrchestrator,
+    extract_json_block,
+    parse_plan_response,
+    _normalize_duration_phrases,
+    _normalize_hours_phrases,
+)
 from app.api.client import ApiCallResult, DownloaderApiClient
 
 
@@ -30,12 +37,28 @@ def test_parse_plan_response_ignores_unknown_endpoints():
 class StubClient(DownloaderApiClient):
     """Client stub that returns predefined payloads."""
 
-    def __init__(self, payload: Dict[str, Any]) -> None:
+    def __init__(self, payloads: Dict[str, Any]) -> None:
         super().__init__(base_url="http://stub")
-        self._payload = payload
+        self._payloads = payloads
+        self.calls: List[ApiCallResult] = []
 
     def request(self, endpoint_name: str, *, params: Dict[str, Any] | None = None):
-        return ApiCallResult(endpoint=endpoint_name, params=params or {}, data=self._payload, status_code=200)
+        entry = self._payloads.get(endpoint_name, {})
+        data = entry.get("data") if isinstance(entry, dict) else entry
+        status_code = entry.get("status_code", 200) if isinstance(entry, dict) else 200
+        error = entry.get("error") if isinstance(entry, dict) else None
+        if status_code >= 400 and error is None:
+            error = '{"detail": "customer_not_found"}'
+            data = None
+        result = ApiCallResult(
+            endpoint=endpoint_name,
+            params=params or {},
+            data=data,
+            error=error,
+            status_code=status_code,
+        )
+        self.calls.append(result)
+        return result
 
 
 class StubLLM:
@@ -65,7 +88,30 @@ def orchestrator():
     def summarizer_factory():
         return StubLLM("Final Answer: datos mezclados")
 
-    client = StubClient({"kpis": {"total_samples": 1}})
+    payloads = {
+        "metrics_summary": {"data": {"kpis": {"total_samples": 1}}},
+        "analytics_customers_orders_summary": {
+            "data": {
+                "matched_customer": {"id": 101, "name": "La Casa de las Flores"},
+                "metrics": {"open_orders": 2},
+                "orders": [
+                    {
+                        "order_id": 3452,
+                        "state": "CREATED",
+                        "samples": [{"sample_id": 555}],
+                        "tests": [{"test_id": 777}],
+                    },
+                    {
+                        "order_id": 4001,
+                        "state": "COMPLETED",
+                        "samples": [],
+                        "tests": [],
+                    },
+                ],
+            }
+        },
+    }
+    client = StubClient(payloads)
     return ApiOrchestrator(
         client=client,
         planner_llm_factory=planner_factory,
@@ -79,3 +125,56 @@ def test_orchestrator_runs_plan(orchestrator):
     assert result["used"] == "api"
     assert result["answer"].startswith("Final Answer")
     assert result["calls"][0]["endpoint"] == "metrics_summary"
+
+
+def test_normalize_duration_phrases_converts_decimal_days():
+    original = "Average TAT is 4.36 days and SLA is 2 day."
+    transformed = _normalize_duration_phrases(original)
+    assert "4d" in transformed and "h" in transformed
+    assert "2d 0h" in transformed
+
+
+def test_normalize_hours_phrases_converts_long_hours():
+    original = "Average duration is 77 hours and max was 20 hours."
+    transformed = _normalize_hours_phrases(original)
+    assert "3d" in transformed and "5h" in transformed
+    assert "20 hours" in transformed  # stays as hours when below threshold
+
+
+def test_open_orders_question_uses_special_plan(orchestrator):
+    result = orchestrator.answer("La Casa de las Flores open orders")
+    endpoints = [call["endpoint"] for call in result["calls"]]
+    assert endpoints == ["analytics_customers_orders_summary"]
+    assert result["used"] == "api:special"
+    params = result["calls"][0]["params"]
+    assert params["customer_name"] == "La Casa de las Flores"
+    client_calls = getattr(orchestrator, "client").calls
+    assert client_calls[0].endpoint == "analytics_customers_orders_summary"
+    assert client_calls[0].params["customer_name"] == "La Casa de las Flores"
+    assert client_calls[0].params["include_samples"] is True
+    assert client_calls[0].params["include_tests"] is True
+
+
+def test_open_orders_name_not_found(orchestrator):
+    orchestrator.client._payloads["analytics_customers_orders_summary"] = {
+        "status_code": 404,
+        "error": '{"detail": "customer_not_found"}',
+    }
+    result = orchestrator.answer("Unknown Labs open orders")
+    assert result["used"] == "api:special"
+    assert "couldn't find any customer" in result["answer"].lower()
+
+
+def test_customer_samples_question_routes_to_summary(orchestrator):
+    result = orchestrator.answer("Dreamscape Farms samples")
+    assert result["used"] == "api:special"
+    assert result["calls"][0]["endpoint"] == "analytics_customers_orders_summary"
+    assert result["calls"][0]["params"]["customer_name"] == "Dreamscape Farms"
+
+
+def test_customer_order_question_highlights_specific_order(orchestrator):
+    result = orchestrator.answer("What happened to order 3452 from La Casa de las Flores?")
+    call = result["calls"][0]
+    data = call["data"]
+    matches = data.get("focus_matches", {})
+    assert matches["orders"][0]["order_id"] == 3452

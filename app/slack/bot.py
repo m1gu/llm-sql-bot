@@ -1,4 +1,4 @@
-"""Slack bot that routes questions to the Downloader API-backed agent."""
+﻿"""Slack bot that routes questions to the Downloader API-backed agent."""
 
 from __future__ import annotations
 
@@ -122,14 +122,13 @@ class SlackBot:
             answer = _strip_final_answer(answer)
         except Exception as exc:  # pragma: no cover
             LOGGER.exception("Slack bot failed processing question.")
-            answer = f"An error occurred while processing your request: {exc}"
+            answer = "The analytics service is taking longer than expected to respond. Please try again shortly."
 
         say_kwargs = {"text": answer, "channel": channel}
         if thread_ts:
             say_kwargs["thread_ts"] = thread_ts
         say(**say_kwargs)
 
-        # Optionally delete the progress message if possible
         try:
             if isinstance(progress_message, dict):
                 ts = progress_message.get("ts")
