@@ -654,3 +654,141 @@ Devuelve un resumen compacto de órdenes por cliente, resolviendo nombres parcia
 1. Si `match_strategy=best` no encuentra coincidencias válidas responde `404` con `detail="customer_not_found"`.
 2. `include_samples` / `include_tests` consulta las tablas `samples` y `tests` para calcular `pending_samples`, `pending_tests` y `top_pending`, sin devolver registros individuales para mantener la respuesta ligera.
 3. `last_updated_at` refleja cuándo se generó el resumen (UTC) para que el bot pueda citar la frescura de los datos.
+
+
+
+## ENTITIES – ORDER, SAMPLE & TEST DETAIL
+
+Estos endpoints devuelven en una sola llamada el detalle enriquecido de órdenes, samples y tests, incluyendo estado, ventanas SLA y vínculos cruzados.
+
+### GET /api/v1/entities/orders/{order_id}
+
+Devuelve el estado actual del pedido, sus timestamps clave y las entidades vinculadas.
+
+**Parámetros**
+
+| Nombre | Tipo | Descripción |
+| --- | --- | --- |
+| `order_id` | path (int) | Identificador interno del pedido. |
+| `sla_hours` | query (float, default 48) | SLA utilizado para calcular `sla_status`. |
+| `include_samples` | query (bool, default `true`) | Adjunta los samples relacionados. |
+| `include_tests` | query (bool, default `false`) | Adjunta tests agrupados por sample (implica `include_samples=true`). |
+
+**Respuesta**
+
+```json
+{
+  "order": {
+    "id": 3442,
+    "custom_formatted_id": "ORD-110325-3442",
+    "state": "CREATED",
+    "sla_status": "overdue",
+    "date_created": "2025-11-03T20:22:00Z",
+    "date_completed": null,
+    "date_order_reported": null,
+    "date_received": "2025-11-03T10:05:00Z",
+    "sla_hours": 48,
+    "age_hours": 139.8,
+    "pending_samples": 3,
+    "pending_tests": 9
+  },
+  "customer": {
+    "id": 386,
+    "name": "Full Bloom Management LLC"
+  },
+  "samples": [
+    {
+      "id": 16158,
+      "sample_name": "4714 10mg Fruit Chew",
+      "state": "CREATED",
+      "has_report": false,
+      "pending_tests": 9,
+      "tests": [
+        {"id": 55506, "label_abbr": "CN", "state": "WEIGHED", "has_report": false},
+        {"id": 55510, "label_abbr": "FFM", "state": "COMPLETED", "has_report": true}
+      ]
+    }
+  ]
+}
+```
+
+**Errores:** `404 Not Found` si el pedido no existe.
+
+### GET /api/v1/entities/samples/{sample_id}/full
+
+Extiende el endpoint clásico de samples devolviendo la orden, tests y batches asociados, junto con el SLA del sample.
+
+**Parámetros:** `sla_hours` (float, default 48), `include_tests` (bool, default `true`), `include_batches` (bool, default `true`).
+
+**Payload ejemplo**
+
+```json
+{
+  "sample": {
+    "id": 16158,
+    "sample_name": "4714 10mg Fruit Chew",
+    "order_id": 3442,
+    "state": "CREATED",
+    "date_created": "2025-11-03T20:22:00Z",
+    "start_date": "2025-11-03T18:30:00Z",
+    "completed_date": null,
+    "sla_status": "warning",
+    "sla_hours": 24
+  },
+  "order": {
+    "id": 3442,
+    "state": "CREATED",
+    "customer": {"id": 386, "name": "Full Bloom Management LLC"}
+  },
+  "tests": [
+    {"id": 55506, "label_abbr": "CN", "state": "WEIGHED", "has_report": false, "report_completed_date": null},
+    {"id": 55510, "label_abbr": "FFM", "state": "COMPLETED", "has_report": true, "report_completed_date": "2025-11-05T12:00:00Z"}
+  ],
+  "batches": [
+    {"id": 101, "display_name": "Sugary CIP-edible"}
+  ]
+}
+```
+
+### GET /api/v1/entities/tests/{test_id}/full
+
+Devuelve estado, SLA y enlaces hacia el sample/orden del test.
+
+**Parámetros:** `sla_hours` (float, default 48), `include_sample` (bool, default `true`), `include_order` (bool, default `true`), `include_batches` (bool, default `true`), `include_raw_worksheet` (bool, default `false`).
+
+**Payload ejemplo**
+
+```json
+{
+  "test": {
+    "id": 55506,
+    "label_abbr": "CN",
+    "state": "WEIGHED",
+    "has_report": false,
+    "date_created": "2025-11-03T20:35:00Z",
+    "report_completed_date": null,
+    "sla_status": "overdue",
+    "sla_hours": 36,
+    "worksheet_raw": null
+  },
+  "sample": {
+    "id": 16158,
+    "sample_name": "4714 10mg Fruit Chew",
+    "state": "CREATED"
+  },
+  "order": {
+    "id": 3442,
+    "state": "CREATED",
+    "customer": {"id": 386, "name": "Full Bloom Management LLC"}
+  },
+  "batches": [
+    {"id": 101, "display_name": "Sugary CIP-edible"}
+  ]
+}
+```
+
+**Notas compartidas**
+
+1. `sla_status` usa los mismos umbrales que el endpoint de resumen (`warning` al superar el 75% del SLA, `overdue` al rebasar el SLA).
+2. Los conteos `pending_*` sólo aparecen cuando los registros siguen abiertos (sin `completed_date` ni `report_completed_date`).
+3. Las rutas devuelven `404` con `detail="not_found"` cuando la entidad solicitada no existe.

@@ -1,0 +1,106 @@
+Roadmap MCP Integration
+=======================
+
+Fase 0 – Diagnóstico y diseño base
+----------------------------------
+Objetivo:
+- Entender los servicios actuales (bot de Slack, orquestador, endpoints) y definir cómo se mapearán a un cliente MCP y a herramientas específicas.
+
+Tareas:
+1. Inventariar servicios que se convertirán en tools MCP (DB read, API negocio, RAG/schema).
+2. Definir estructura del servidor MCP (lenguaje, framework, autenticación).
+3. Redactar contrato preliminar de cada tool (nombre, parámetros, tipo de respuesta).
+
+Entregable funcional:
+- Documento técnico con el mapa de tools y el diseño del servidor MCP, revisado y aprobado.
+
+Prompt para Codex:
+- “Analiza la arquitectura actual y redacta un documento con la lista de tools MCP propuestas, su responsabilidad, parámetros y payloads de respuesta.”
+
+Fase 1 – Servidor MCP mínimo (tools de lectura)
+----------------------------------------------
+Objetivo:
+- Implementar un servidor MCP que exponga al menos las herramientas de lectura esenciales (DB read, schema provider, API negocio read-only).
+
+Tareas:
+1. Configurar servidor MCP (p.ej., Python + fastmcp) con endpoints de health y metadata.
+2. Implementar tool `db_read` que acepte SQL seguro y devuelva filas.
+3. Implementar tool `schema_info` que entregue el schema y glosario actuales.
+4. Implementar tool `api_business_read` que proxyea los endpoints analíticos existentes.
+5. Agregar pruebas unitarias/locales para cada tool MCP.
+
+Entregable funcional:
+- Servidor MCP ejecutable localmente, con tools de lectura accesibles y probados desde un cliente MCP simple (por ejemplo, un script de prueba).
+
+Prompt para Codex:
+- “Crea un servidor MCP básico en Python que exponga las tools db_read, schema_info y api_business_read según la especificación adjunta, con pruebas para cada tool.”
+
+Fase 2 – Agente (LangGraph/Planner) como cliente MCP
+----------------------------------------------------
+Objetivo:
+- Migrar el orquestador actual a un agente (idealmente LangGraph) que consuma únicamente tools MCP para planificar y ejecutar respuestas.
+
+Tareas:
+1. Diseñar el grafo/base de estados del agente (detecta intención, planifica, ejecuta tools y sintetiza respuesta).
+2. Implementar el cliente MCP dentro del agente y conectarlo con las tools de Fase 1.
+3. Reemplazar la lógica directa de llamadas HTTP/DB por invocaciones MCP.
+4. Re-entrenar o ajustar prompts para el nuevo flujo.
+5. Validar el agente con casos de prueba (KPI global, cliente nombre+order, order ID, etc.).
+
+Entregable funcional:
+- Agente ejecutable que responde preguntas end-to-end usando sólo tools MCP, con un set de pruebas passing (automatizadas o script manual verificado).
+
+Prompt para Codex:
+- “Implementa un agente LangGraph que utilice el cliente MCP para invocar las tools db_read, schema_info y api_business_read, reemplazando el orquestador directo actual.”
+
+Fase 3 – Tools adicionales (RAG, DB write opcional, observabilidad)
+------------------------------------------------------------------
+Objetivo:
+- Enriquecer el servidor MCP con herramientas adicionales (RAG/pgvector, logs/observabilidad, futuros DB write si aplica).
+
+Tareas:
+1. Implementar tool `rag_schema_lookup` que consulte pgvector/embeddings.
+2. Implementar tool de observabilidad (logs/metrics) accesible para debug.
+3. (Opcional) Implementar tools de escritura controlada (p.ej., audit-log insert).
+4. Actualizar el agente para aprovechar las nuevas tools cuando sean relevantes.
+5. Añadir pruebas que validen la integración RAG + agente.
+
+Entregable funcional:
+- Servidor MCP con las tools extra y agente actualizado que demuestra consultas soportadas con RAG y/o nuevas capacidades.
+
+Prompt para Codex:
+- “Extiende el servidor MCP para incluir la tool rag_schema_lookup (pgvector) y ajusta el agente para usarla cuando necesite contexto adicional sobre el schema.”
+
+Fase 4 – Integración Slack + DevOps
+-----------------------------------
+Objetivo:
+- Conectar el bot de Slack con el agente MCP y preparar pipelines de despliegue/monitorización.
+
+Tareas:
+1. Modificar `app.slack.bot` para que el bot hable con el nuevo agente MCP (CLI o API).
+2. Configurar orquestación/runner (Docker Compose, PM2, systemd) que levante: servidor MCP, agente, bot.
+3. Añadir monitoreo/logging centralizado para MCP y agente (p.ej., Prometheus o logs JSON).
+4. Realizar pruebas end-to-end en ambiente de staging.
+
+Entregable funcional:
+- Bot de Slack en staging que usa el agente MCP, con logs/metrics básicos y scripts de arranque documentados.
+
+Prompt para Codex:
+- “Actualiza el bot de Slack para que delegue las preguntas al agente MCP (CLI/API) y documenta el proceso de despliegue (Docker Compose) con logs/metrics.”
+
+Fase 5 – Endurecimiento y QA continuo
+-------------------------------------
+Objetivo:
+- Añadir pruebas end-to-end automatizadas, hardening de seguridad y documentación final.
+
+Tareas:
+1. Escribir suites de pruebas automatizadas (pytest o Playwright) que simulen las principales preguntas vía bot → agente.
+2. Revisar y ajustar controles de seguridad en MCP (rate limit, auth tokens).
+3. Completar documentación (readme técnico, guías de operación).
+4. Evaluar oportunidades de streaming/respuestas parciales.
+
+Entregable funcional:
+- Release candidate con pruebas automatizadas verdes, documentación y controles de seguridad listos para producción.
+
+Prompt para Codex:
+- “Agrega pruebas end-to-end que ejerciten el bot de Slack contra el agente MCP, asegura que las suites se ejecuten en el pipeline y documenta los pasos de operación/seguridad.”

@@ -110,6 +110,28 @@ def orchestrator():
                 ],
             }
         },
+        "entities_order_detail": {
+            "data": {
+                "order": {"id": 3452, "state": "CREATED", "pending_tests": 9},
+                "samples": [{"id": 555, "state": "CREATED"}],
+            }
+        },
+        "entities_sample_full": {
+            "data": {
+                "sample": {"id": 555, "state": "CREATED"},
+                "order": {"id": 3452},
+                "tests": [{"id": 777, "state": "RUNNING"}],
+            }
+        },
+        "entities_test_full": {
+            "data": {
+                "test": {"id": 777, "state": "RUNNING"},
+                "sample": {"id": 555},
+                "order": {"id": 3452},
+            }
+        },
+        "metrics_samples_overview": {"data": {"kpis": {"pending": 5}}},
+        "analytics_orders_overdue": {"data": {"orders": []}},
     }
     client = StubClient(payloads)
     return ApiOrchestrator(
@@ -122,9 +144,8 @@ def orchestrator():
 
 def test_orchestrator_runs_plan(orchestrator):
     result = orchestrator.answer("¿Cuántos samples tenemos?")
-    assert result["used"] == "api"
-    assert result["answer"].startswith("Final Answer")
-    assert result["calls"][0]["endpoint"] == "metrics_summary"
+    assert result["used"] == "api:special"
+    assert result["calls"][0]["endpoint"] == "metrics_samples_overview"
 
 
 def test_normalize_duration_phrases_converts_decimal_days():
@@ -172,9 +193,48 @@ def test_customer_samples_question_routes_to_summary(orchestrator):
     assert result["calls"][0]["params"]["customer_name"] == "Dreamscape Farms"
 
 
-def test_customer_order_question_highlights_specific_order(orchestrator):
+def test_order_question_with_customer_extracts_focus_match(orchestrator):
     result = orchestrator.answer("What happened to order 3452 from La Casa de las Flores?")
     call = result["calls"][0]
-    data = call["data"]
+    matches = call["data"]["focus_matches"]
+    assert matches["orders"][0]["order_id"] == 3452
+
+
+def test_ready_to_report_samples_routes_to_entity_endpoint(orchestrator):
+    result = orchestrator.answer("Ready to report samples")
+    assert result["calls"][0]["endpoint"] == "metrics_samples_overview"
+    assert result["used"] == "api:special"
+
+
+def test_global_kpi_question_skips_llm_plan(orchestrator):
+    result = orchestrator.answer("Total samples overall?")
+    assert result["calls"][0]["endpoint"] == "metrics_summary"
+    assert result["used"] == "api:special"
+
+
+def test_customer_order_question_highlights_specific_order(orchestrator):
+    result = orchestrator.answer("What happened to order 3452 from La Casa de las Flores?")
+    endpoints = [call["endpoint"] for call in result["calls"]]
+    assert endpoints[0] == "analytics_customers_orders_summary"
+    assert endpoints[1] == "entities_order_detail"
+    data = result["calls"][0]["data"]
     matches = data.get("focus_matches", {})
     assert matches["orders"][0]["order_id"] == 3452
+
+
+def test_order_id_without_customer_uses_entity_endpoint(orchestrator):
+    result = orchestrator.answer("Need update on order 3452")
+    assert result["calls"][0]["endpoint"] == "entities_order_detail"
+    assert result["calls"][0]["params"]["order_id"] == 3452
+
+
+def test_sample_id_without_customer_uses_entity_endpoint(orchestrator):
+    result = orchestrator.answer("sample 555 status?")
+    assert result["calls"][0]["endpoint"] == "entities_sample_full"
+    assert result["calls"][0]["params"]["sample_id"] == 555
+
+
+def test_test_id_without_customer_uses_entity_endpoint(orchestrator):
+    result = orchestrator.answer("test 777 details")
+    assert result["calls"][0]["endpoint"] == "entities_test_full"
+    assert result["calls"][0]["params"]["test_id"] == 777

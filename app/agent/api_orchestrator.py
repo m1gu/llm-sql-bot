@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import logging
 import re
-from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 from app.api.client import ApiCallResult, DownloaderApiClient
 from app.api.endpoints import ENDPOINT_SPECS, build_endpoint_catalog
@@ -168,7 +168,7 @@ class ApiOrchestrator:
 
     def answer(self, question: str) -> Dict[str, Any]:
         range_context = self._resolve_range_context(question)
-        special_plan = self._build_special_plan(question)
+        special_plan = self._build_priority_plan(question)
         special_used = special_plan is not None
         special_context = special_plan.context if special_plan else None
         plan_calls = special_plan.calls if special_plan else self._plan_calls(question, range_context)
@@ -247,58 +247,94 @@ class ApiOrchestrator:
         if not special_context:
             return
         focus_entities: Dict[str, List[int]] = special_context.get("focus_entities") or {}
-        if not any(focus_entities.values()):
+        if not focus_entities:
             return
         for result in results:
-            if result.endpoint != CUSTOMER_ORDERS_ENDPOINT:
-                continue
             data = result.data
             if not isinstance(data, dict):
                 continue
-            orders = data.get("orders")
-            if not isinstance(orders, list):
-                continue
-            matches: Dict[str, Any] = {}
-            if focus_entities.get("orders"):
-                matches["orders"] = [
-                    order
-                    for order in orders
-                    if order.get("order_id") in focus_entities["orders"]
-                ]
-            if focus_entities.get("samples"):
-                sample_hits = []
-                for order in orders:
-                    for sample in order.get("samples", []):
-                        if sample.get("sample_id") in focus_entities["samples"]:
-                            sample_hits.append(
-                                {
-                                    **sample,
-                                    "order_id": order.get("order_id"),
-                                }
-                            )
-                if sample_hits:
-                    matches["samples"] = sample_hits
-            if focus_entities.get("tests"):
-                test_hits = []
-                for order in orders:
-                    for test in order.get("tests", []):
-                        if test.get("test_id") in focus_entities["tests"]:
-                            test_hits.append(
-                                {
-                                    **test,
-                                    "order_id": order.get("order_id"),
-                                }
-                            )
-                if test_hits:
-                    matches["tests"] = test_hits
-            if matches:
-                data["focus_matches"] = matches
-            elif focus_entities.get("orders") or focus_entities.get("samples") or focus_entities.get("tests"):
-                data.setdefault(
-                    "focus_matches",
-                    {"note": "No matches found for the requested IDs within this customer summary."},
-                )
-    def _build_special_plan(self, question: str) -> Optional[SpecialPlan]:
+            if result.endpoint == CUSTOMER_ORDERS_ENDPOINT:
+                orders = data.get("orders")
+                if not isinstance(orders, list):
+                    continue
+                matches: Dict[str, Any] = {}
+                if focus_entities.get("orders"):
+                    matches["orders"] = [
+                        order
+                        for order in orders
+                        if order.get("order_id") in focus_entities["orders"]
+                    ]
+                if focus_entities.get("samples"):
+                    sample_hits = []
+                    for order in orders:
+                        for sample in order.get("samples", []):
+                            if sample.get("sample_id") in focus_entities["samples"]:
+                                sample_hits.append(
+                                    {
+                                        **sample,
+                                        "order_id": order.get("order_id"),
+                                    }
+                                )
+                    if sample_hits:
+                        matches["samples"] = sample_hits
+                if focus_entities.get("tests"):
+                    test_hits = []
+                    for order in orders:
+                        for test in order.get("tests", []):
+                            if test.get("test_id") in focus_entities["tests"]:
+                                test_hits.append(
+                                    {
+                                        **test,
+                                        "order_id": order.get("order_id"),
+                                    }
+                                )
+                    if test_hits:
+                        matches["tests"] = test_hits
+                if matches:
+                    data["focus_matches"] = matches
+                elif any(focus_entities.values()):
+                    data.setdefault(
+                        "focus_matches",
+                        {"note": "No matches found for the requested IDs within this customer summary."},
+                    )
+            elif result.endpoint in _ENTITY_DETAIL_ENDPOINT_TO_ENTITY:
+                entity = _ENTITY_DETAIL_ENDPOINT_TO_ENTITY[result.endpoint]
+                matches: Dict[str, Any] = {}
+                if entity == "orders" and data.get("order"):
+                    matches["orders"] = [data["order"]]
+                    if data.get("samples"):
+                        matches["samples"] = data["samples"]
+                elif entity == "samples" and data.get("sample"):
+                    matches["samples"] = [data["sample"]]
+                    if data.get("tests"):
+                        matches["tests"] = data["tests"]
+                elif entity == "tests" and data.get("test"):
+                    matches["tests"] = [data["test"]]
+                if matches:
+                    data["focus_matches"] = matches
+    def _build_priority_plan(self, question: str) -> Optional[SpecialPlan]:
+        return (
+            self._build_global_kpi_plan(question)
+            or self._build_customer_plan(question)
+            or self._build_entity_detail_plan(question)
+            or self._build_entity_state_plan(question)
+        )
+
+    def _build_global_kpi_plan(self, question: str) -> Optional[SpecialPlan]:
+        lowered = question.lower()
+        if not any(keyword in lowered for keyword in _GLOBAL_KPI_KEYWORDS):
+            return None
+        calls = [
+            EndpointCall(
+                endpoint="metrics_summary",
+                params={},
+                reason="Consultar KPIs globales solicitados por el usuario.",
+            )
+        ]
+        context: Dict[str, Any] = {"intent": "global_kpi"}
+        return SpecialPlan(calls=calls, context=context)
+
+    def _build_customer_plan(self, question: str) -> Optional[SpecialPlan]:
         focus, topic = _extract_customer_focus(question)
         if not focus:
             return None
@@ -317,11 +353,67 @@ class ApiOrchestrator:
                 reason=f"Consultar resumen de {topic or 'orders'} para el cliente '{focus}'.",
             )
         ]
+        entity_calls = self._build_entity_detail_calls(focus_entities)
+        calls.extend(entity_calls)
         context: Dict[str, Any] = {
             "customer_focus": focus,
             "customer_topic": topic or "orders",
             "focus_entities": focus_entities,
         }
+        return SpecialPlan(calls=calls, context=context)
+
+    def _build_entity_detail_plan(self, question: str) -> Optional[SpecialPlan]:
+        focus_entities = _extract_entity_ids(question)
+        for entity in ("orders", "samples", "tests"):
+            ids = focus_entities.get(entity)
+            if ids:
+                config = _ENTITY_DETAIL_CONFIG[entity]
+                params = {config["param"]: ids[0]}
+                params.update(config["defaults"])
+                calls = [
+                    EndpointCall(
+                        endpoint=config["endpoint"],
+                        params=params,
+                        reason=f"Obtener detalle del {entity[:-1]} {ids[0]}.",
+                    )
+                ]
+                context: Dict[str, Any] = {"intent": "entity_detail", "focus_entities": {entity: ids}}
+                return SpecialPlan(calls=calls, context=context)
+        return None
+
+    def _build_entity_detail_calls(self, focus_entities: Dict[str, List[int]]) -> List[EndpointCall]:
+        calls: List[EndpointCall] = []
+        for entity, config in _ENTITY_DETAIL_CONFIG.items():
+            ids = focus_entities.get(entity)
+            if not ids:
+                continue
+            params = {config["param"]: ids[0]}
+            params.update(config["defaults"])
+            calls.append(
+                EndpointCall(
+                    endpoint=config["endpoint"],
+                    params=params,
+                    reason=f"Obtener detalle del {entity[:-1]} {ids[0]} para enriquecer la respuesta.",
+                )
+            )
+        return calls
+
+    def _build_entity_state_plan(self, question: str) -> Optional[SpecialPlan]:
+        entity = _detect_entity_keyword(question)
+        if not entity:
+            return None
+        state_term = _detect_state_keyword(question)
+        endpoint = _ENTITY_STATE_ENDPOINTS.get(entity)
+        if not endpoint:
+            return None
+        calls = [
+            EndpointCall(
+                endpoint=endpoint,
+                params={},
+                reason=f"Consultar {entity} con estado solicitado ({state_term or 'general'}).",
+            )
+        ]
+        context: Dict[str, Any] = {"intent": "entity_state", "entity": entity, "state_term": state_term}
         return SpecialPlan(calls=calls, context=context)
 
     def _summarize(
@@ -514,6 +606,112 @@ def _wrap_tables(text: str) -> str:
 _DURATION_PATTERN = re.compile(r"\b(\d+(?:\.\d+)?)\s*(?:day|days|d[ií]a|d[ií]as)\b", re.IGNORECASE)
 _HOURS_PATTERN = re.compile(r"\b(\d+(?:\.\d+)?)\s*(?:hours?|hrs?)\b", re.IGNORECASE)
 
+_GLOBAL_KPI_KEYWORDS = {
+    "total samples",
+    "total tests",
+    "total customers",
+    "total reports",
+    "overall samples",
+    "overall tests",
+    "kpi",
+    "kpis",
+    "summary metrics",
+    "metrics summary",
+}
+
+_ENTITY_KEYWORDS = {
+    "orders": ["order", "orders", "orden", "ordenes", "órdenes"],
+    "samples": ["sample", "samples", "muestra", "muestras"],
+    "tests": ["test", "tests", "prueba", "pruebas"],
+}
+
+_ENTITY_STATE_ENDPOINTS = {
+    "orders": "analytics_orders_overdue",
+    "samples": "metrics_samples_overview",
+    "tests": "metrics_tests_overview",
+}
+
+_ENTITY_DETAIL_CONFIG = {
+    "orders": {
+        "endpoint": "entities_order_detail",
+        "param": "order_id",
+        "defaults": {"include_samples": True, "include_tests": False},
+    },
+    "samples": {
+        "endpoint": "entities_sample_full",
+        "param": "sample_id",
+        "defaults": {"include_tests": True, "include_batches": True},
+    },
+    "tests": {
+        "endpoint": "entities_test_full",
+        "param": "test_id",
+        "defaults": {
+            "include_sample": True,
+            "include_order": True,
+            "include_batches": True,
+            "include_raw_worksheet": False,
+        },
+    },
+}
+_ENTITY_DETAIL_ENDPOINT_TO_ENTITY = {
+    config["endpoint"]: entity for entity, config in _ENTITY_DETAIL_CONFIG.items()
+}
+
+_STATE_KEYWORDS = {
+    "overdue": [
+        "overdue",
+        "delayed",
+        "late",
+        "atrasada",
+        "vencida",
+        "vencidas",
+    ],
+    "ready": [
+        "ready to report",
+        "ready for report",
+        "ready for reporting",
+        "listo para reportar",
+        "listos para reportar",
+        "ready to deliver",
+    ],
+    "open": [
+        "open",
+        "pending",
+        "in progress",
+        "en progreso",
+        "pendiente",
+        "pending completion",
+        "waiting",
+    ],
+}
+
+_STOPWORD_TOKENS = {
+    "ready",
+    "report",
+    "reports",
+    "sample",
+    "samples",
+    "test",
+    "tests",
+    "order",
+    "orders",
+    "pending",
+    "overdue",
+    "total",
+    "overall",
+    "average",
+    "open",
+    "what",
+    "happened",
+    "to",
+    "from",
+    "the",
+    "need",
+    "update",
+    "status",
+    "on",
+}
+
 
 def _format_decimal_days(days_value: float) -> str:
     whole_days = int(days_value)
@@ -617,9 +815,9 @@ def _extract_customer_focus(question: str) -> tuple[Optional[str], Optional[str]
 
 
 def _clean_customer_name(name: str) -> str:
-    cleaned = name.strip(" ?!.:,;\"'()¿¡")
+    cleaned = name.strip(' ?!.:,;"\'()\u00bf\u00a1')
     # Remove trailing filler words
-    for suffix in ("orders", "samples", "tests"):
+    for suffix in ("orders", "samples", "tests", "open", "pending", "overdue"):
         if cleaned.lower().endswith(f" {suffix}"):
             cleaned = cleaned[: -len(suffix) - 1].strip()
     lowered = cleaned.lower()
@@ -639,6 +837,7 @@ def _clean_customer_name(name: str) -> str:
             lowered = cleaned.lower()
     cleaned = re.sub(r"^(?:what|which|who|que|qué|cual|cuál)\s+", "", cleaned, flags=re.IGNORECASE)
     return cleaned
+
 def _is_probable_customer_name(name: str) -> bool:
     if not name or len(name) < 3:
         return False
@@ -646,6 +845,14 @@ def _is_probable_customer_name(name: str) -> bool:
     first_word = lowered.split()[0]
     if first_word in _QUESTION_PREFIXES:
         return False
+    tokens = re.findall(r"[a-zñáéíóú]+", lowered)
+    if not tokens:
+        return False
+    if all(token in _STOPWORD_TOKENS for token in tokens):
+        return False
+    if not any(char.isalpha() and char.isupper() for char in name):
+        if len(tokens) == 1 and len(tokens[0]) <= 4:
+            return False
     return any(char.isalpha() for char in name)
 
 
@@ -671,7 +878,7 @@ def _infer_topic(text: str) -> str:
 
 def _extract_name_after_preposition(text: str) -> Optional[str]:
     match = re.search(
-        r"(?:from|for|by|para|de|del)\s+([A-Za-z0-9][^?.!,;]*)",
+        r"(?:order|orders|sample|samples|test|tests)\s+(?:from|for|by|para|de|del)\s+([A-Za-z0-9][^?.!,;]*)",
         text,
         re.IGNORECASE,
     )
@@ -721,6 +928,23 @@ def _find_numbers(text: str, keywords: List[str]) -> List[int]:
         except ValueError:
             continue
     return matches
+
+
+def _detect_entity_keyword(question: str) -> Optional[str]:
+    lowered = question.lower()
+    for entity, keywords in _ENTITY_KEYWORDS.items():
+        if any(keyword in lowered for keyword in keywords):
+            return entity
+    return None
+
+
+def _detect_state_keyword(question: str) -> Optional[str]:
+    lowered = question.lower()
+    for state, keywords in _STATE_KEYWORDS.items():
+        for keyword in keywords:
+            if keyword in lowered:
+                return state
+    return None
 
 
 
