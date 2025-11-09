@@ -17,6 +17,10 @@ Entregable funcional:
 Prompt para Codex:
 - “Analiza la arquitectura actual y redacta un documento con la lista de tools MCP propuestas, su responsabilidad, parámetros y payloads de respuesta.”
 
+
+git push -u origin feature/mcp-integration
+
+
 Fase 1 – Servidor MCP mínimo (tools de lectura)
 ----------------------------------------------
 Objetivo:

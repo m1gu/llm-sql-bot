@@ -11,3 +11,5 @@ loguru
 prometheus-client
 httpx
 slack_bolt
+fastmcp>=0.0.9
+pydantic-settings
